@@ -12,6 +12,8 @@ class RubyLexer
 
   attr_accessor :lex_strterm
 
+  attr_accessor :lex_resume
+
   attr_accessor :parser # HACK for very end of lexer... *sigh*
 
   # Stream of data that yylex examines.
@@ -100,7 +102,7 @@ class RubyLexer
   end
 
   def heredoc here # 63 lines
-    _, eos, func, last_line = here
+    _, eos, func, return_to = here
 
     indent  = (func & STR_FUNC_INDENT) != 0
     expand  = (func & STR_FUNC_EXPAND) != 0
@@ -111,7 +113,7 @@ class RubyLexer
       src.eos?
 
     if src.beginning_of_line? && src.scan(eos_re) then
-      src.unread_many last_line # TODO: figure out how to remove this
+      src.pos, self.lex_resume = [return_to, src.pos]
       self.yacc_value = eos
       return :tSTRING_END
     end
@@ -131,7 +133,7 @@ class RubyLexer
         string_buffer << '#'
       end
 
-      until src.scan(eos_re) do
+      until src.check(eos_re) do
         c = tokadd_string func, "\n", nil
 
         rb_compile_error err_msg if
@@ -147,9 +149,6 @@ class RubyLexer
         rb_compile_error err_msg if
           src.eos?
       end
-
-      # tack on a NL after the heredoc token - FIX NL should not be needed
-      src.unread_many(eos + "\n") # TODO: remove this... stupid stupid stupid
     else
       until src.check(eos_re) do
         string_buffer << src.scan(/.*(\n|\z)/)
@@ -158,7 +157,7 @@ class RubyLexer
       end
     end
 
-    self.lex_strterm = [:heredoc, eos, func, last_line]
+    self.lex_strterm = [:heredoc, eos, func, return_to]
     self.yacc_value = string_buffer.join.delete("\r")
 
     return :tSTRING_CONTENT
@@ -196,17 +195,17 @@ class RubyLexer
       return nil
     end
 
-    if src.check(/.*\n/) then
-      # TODO: think about storing off the char range instead
-      line = src.string[src.pos, src.matched_size]
-      src.string[src.pos, src.matched_size] = "\n"
+    self.lex_strterm = [:heredoc, string_buffer.join, func, src.pos]
+
+    if src.scan(/.*\n/) then
+      # TODO: figure out how to remove this...
       src.extra_lines_added += 1
-      src.pos += 1
     else
       line = nil
     end
 
-    self.lex_strterm = [:heredoc, string_buffer.join, func, line]
+    src.pos = lex_resume if
+      lex_resume
 
     if term == '`' then
       self.yacc_value = "`"
@@ -665,6 +664,10 @@ class RubyLexer
             if src.eos? then
               return RubyLexer::EOF
             end
+          end
+
+          if lex_resume
+            src.pos, self.lex_resume = [lex_resume, nil]
           end
 
           # Replace a string of newlines with a single one
